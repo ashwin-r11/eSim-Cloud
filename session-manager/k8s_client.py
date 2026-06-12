@@ -1,22 +1,18 @@
 from kubernetes import client, config
-from kubernetes.client.exceptions import ApiException
 import os
 # Mock mode for testing without Kubernetes
 MOCK_MODE = os.getenv("MOCK_K8S", "false").lower() == "true"
 
 def load_k8s_config():
+    """
+    Load Kubernetes config.
+    Inside cluster = automatic config.
+    Local development = kubeconfig file.
+    """
     try:
-        # Pehle in-cluster try karo (production)
         config.load_incluster_config()
     except:
-        try:
-            # Phir local kubeconfig try karo
-            config.load_kube_config()
-        except:
-            # Local dev mein K8s nahi hai — mock mode
-            print("WARNING: No K8s config found, running in mock mode")
-            return False
-    return True
+        config.load_kube_config()
 
 
 # load_k8s_config()
@@ -28,23 +24,13 @@ def create_simulation_pod(user_id: str, namespace: str = "default"):
     Create a new Kubernetes pod for this user.
     Each user gets their own isolated simulation environment.
     """
-    pod_name = f"sim-{user_id}" 
+    pod_name = f"sim-{user_id[:8]}"
     if MOCK_MODE:
         print(f"[MOCK] Created pod: {pod_name}")
         return pod_name
 
     load_k8s_config()
     v1 = client.CoreV1Api()
-    try:
-        existing = v1.read_namespaced_pod(name=pod_name, namespace=namespace)
-        if existing.status.phase in ["Running", "Pending"]:
-            print(f"Pod {pod_name} already exists, deleting first...")
-            v1.delete_namespaced_pod(name=pod_name, namespace=namespace)
-            import time
-            time.sleep(2)  # Delete hone do thoda wait karo
-    except ApiException as e:
-        if e.status != 404:
-            raise  # 404 = pod nahi hai, that's fine. Baaki errors raise karo
     pod_manifest = {
         "apiVersion": "v1",
         "kind": "Pod",
@@ -59,14 +45,13 @@ def create_simulation_pod(user_id: str, namespace: str = "default"):
         "spec": {
             "containers": [{
                 "name": "ngspice",
-                "image": "esim-ngspice:latest",  # Person 1 ka image
-                "imagePullPolicy": "Never",      # 👈 THE FIX 1: Minikube ki local image use karega
-                "command": ["sleep", "infinity"],# 👈 THE FIX 2: Pod ko hamesha zinda (awake) rakhega
+                "image": "esim-ngspice:latest",
+                "imagePullPolicy": "Never",
                 "ports": [{"containerPort": 5000}],
                 "resources": {
                     "limits": {
-                        "cpu": "500m",      # Max 0.5 CPU per user
-                        "memory": "256Mi"   # Max 256MB RAM per user
+                        "cpu": "500m",
+                        "memory": "256Mi"
                     },
                     "requests": {
                         "cpu": "100m",
@@ -77,13 +62,13 @@ def create_simulation_pod(user_id: str, namespace: str = "default"):
             "restartPolicy": "Never"
         }
     }
-    try:
-        v1.create_namespaced_pod(namespace=namespace, body=pod_manifest)
-        print(f"Pod {pod_name} created successfully")
-        return pod_name
-    except ApiException as e:
-        print(f"❌ Pod creation failed: {e}")  # 🆕 FIX: Error print karo — silent fail nahi
-        raise
+
+    v1.create_namespaced_pod(
+        namespace=namespace,
+        body=pod_manifest
+    )
+    return pod_name
+
 
 def delete_simulation_pod(pod_name: str, namespace: str = "default"):
     """
@@ -108,23 +93,22 @@ def delete_simulation_pod(pod_name: str, namespace: str = "default"):
 
 def get_pod_status(pod_name: str, namespace: str = "default"):
     """
-    Check if pod is Running, Pending, Failed, or Terminated.
+    Check if pod is Running, Pending, or Failed.
     """
     if MOCK_MODE:
+        print(f"[MOCK] Status for pod: {pod_name}")
         return "Running"
-    
     load_k8s_config()
     v1 = client.CoreV1Api()
-    
     try:
-        pod = v1.read_namespaced_pod(name=pod_name, namespace=namespace)
-        return pod.status.phase  # Running, Pending, Failed, Succeeded
-    except ApiException as e:
-        if e.status == 404:
-            return "Terminated"  # ✅ Pod exist nahi karta — deleted/expired
-        return "Unknown"
-    except Exception:
-        return "Unknown"
+        pod = v1.read_namespaced_pod(
+            name=pod_name,
+            namespace=namespace
+        )
+        return pod.status.phase
+    except:
+        return None
+
 
 def list_simulation_pods(namespace: str = "default"):
     """
@@ -138,19 +122,3 @@ def list_simulation_pods(namespace: str = "default"):
         label_selector="app=esim-simulation"
     )
     return [pod.metadata.name for pod in pods.items]
-# 🆕 NEW FUNCTION: Expired pods cleanup
-def cleanup_expired_pods(active_pod_names: set, namespace: str = "default"):
-    """
-    K8s mein jo pods hain lekin Redis session nahi hai unhe delete karo.
-    Yeh function background task se call hoga har 30 seconds mein.
-    """
-    if MOCK_MODE:
-        return
-
-    load_k8s_config()
-    all_running_pods = list_simulation_pods(namespace)
-
-    for pod_name in all_running_pods:
-        if pod_name not in active_pod_names:
-            print(f"🧹 Cleaning expired pod: {pod_name}")
-            delete_simulation_pod(pod_name, namespace)
