@@ -1,0 +1,96 @@
+# Prometheus alerting rules for eSim-Cloud simulation pipeline (Task 4)
+groups:
+- name: esim_simulation_alerts
+  interval: 60s
+  rules:
+
+  # --- Failure spike ---
+  - alert: SimulationFailureRateHigh
+    expr: |
+      rate(esim_simulation_jobs_failed_total[5m]) /
+      (rate(esim_simulation_jobs_started_total[5m]) + 1e-9) > 0.25
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Simulation failure rate above 25%"
+      description: >
+        More than 25% of simulation jobs are failing in the last 5 minutes.
+        Current rate: {{ $value | humanizePercentage }}.
+
+  - alert: SimulationFailureRateCritical
+    expr: |
+      rate(esim_simulation_jobs_failed_total[5m]) /
+      (rate(esim_simulation_jobs_started_total[5m]) + 1e-9) > 0.50
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Simulation failure rate above 50% – CRITICAL"
+      description: >
+        More than 50% of simulation jobs are failing. Immediate investigation required.
+
+  # --- Queue saturation ---
+  - alert: SimulationQueueDepthHigh
+    expr: esim_simulation_active_jobs{status="QUEUED"} > 20
+    for: 3m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Simulation queue depth exceeds 20 jobs"
+      description: >
+        {{ $value }} jobs are waiting in QUEUED state for more than 3 minutes.
+        Consider scaling out Celery workers.
+
+  # --- Timeout rate ---
+  - alert: SimulationTimeoutRateHigh
+    expr: rate(esim_simulation_jobs_timeout_total[10m]) > 0.1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High simulation timeout rate (>0.1/s)"
+      description: >
+        Simulations are timing out at a rate of {{ $value | humanize }}/s.
+        Check worker CPU/memory limits and execution_timeout settings.
+
+  # --- Long queue wait ---
+  - alert: SimulationQueueWaitP95High
+    expr: |
+      histogram_quantile(0.95,
+        rate(esim_simulation_queue_wait_seconds_bucket[10m])
+      ) > 120
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "p95 queue wait time exceeds 2 minutes"
+      description: >
+        95th percentile queue wait is {{ $value | humanizeDuration }}.
+        Jobs are taking too long to be dispatched.
+
+  # --- Execution latency ---
+  - alert: SimulationExecutionP99High
+    expr: |
+      histogram_quantile(0.99,
+        rate(esim_simulation_execution_seconds_bucket[10m])
+      ) > 240
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "p99 simulation execution time exceeds 4 minutes"
+      description: >
+        99th percentile execution is {{ $value | humanizeDuration }}.
+
+  # --- Stale RUNNING jobs (OOM / crash) ---
+  - alert: SimulationJobsStuckRunning
+    expr: esim_simulation_active_jobs{status="RUNNING"} > 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Jobs have been RUNNING for >10 minutes"
+      description: >
+        {{ $value }} jobs appear stuck in RUNNING state. Possible OOM kill or
+        worker crash. Check Celery worker logs and heartbeat recovery task.

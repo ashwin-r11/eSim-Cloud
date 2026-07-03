@@ -1,0 +1,64 @@
+# Task 5: Kubernetes NetworkPolicy – strict pod isolation for simulation workloads
+---
+# Deny all ingress/egress for simulation pods by default, then allow only
+# the minimum required traffic.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: simulation-pod-isolation
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      component: sim-worker
+  policyTypes:
+  - Ingress
+  - Egress
+  # No ingress rules → simulation pods accept no inbound connections
+  ingress: []
+  egress:
+  # Allow DNS resolution only
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+---
+# Allow session-manager to reach sim-worker pods on port 8001
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: session-manager-to-sim-worker
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      component: sim-worker
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: session-manager
+    ports:
+    - port: 8001
+      protocol: TCP
+---
+# Allow Django backend to reach Celery workers
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: django-to-celery
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: celery
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: django

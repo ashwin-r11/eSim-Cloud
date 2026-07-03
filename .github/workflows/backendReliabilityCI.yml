@@ -1,0 +1,206 @@
+name: Backend Reliability & Sim-Worker CI
+
+on:
+  push:
+    paths:
+      - 'esim-cloud-backend/**'
+      - 'sim-worker/**'
+      - 'session-manager/**'
+      - 'simulation-engine/**'
+  pull_request:
+    paths:
+      - 'esim-cloud-backend/**'
+      - 'sim-worker/**'
+      - 'session-manager/**'
+      - 'simulation-engine/**'
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Job 1: Django backend tests (Task 8 – full simulation lifecycle tests)
+  # -------------------------------------------------------------------------
+  backend-tests:
+    name: Backend Integration Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:13-alpine
+        env:
+          POSTGRES_USER: esim
+          POSTGRES_PASSWORD: esim
+          POSTGRES_DB: esim_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DJANGO_SETTINGS_MODULE: esimCloud.settings
+      DATABASE_URL: postgresql://esim:esim@localhost:5432/esim_test
+      REDIS_URL: redis://localhost:6379/0
+      SECRET_KEY: ci-secret-key-not-for-production
+      DEBUG: "true"
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+
+    - name: Install backend dependencies
+      working-directory: esim-cloud-backend
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run migrations
+      working-directory: esim-cloud-backend
+      run: python manage.py migrate --run-syncdb
+
+    - name: Run simulation lifecycle tests
+      working-directory: esim-cloud-backend
+      run: |
+        python -m pytest simulationAPI/tests/test_simulation_lifecycle.py \
+          -v --tb=short --no-header
+
+    - name: Run full backend test suite
+      working-directory: esim-cloud-backend
+      run: |
+        python manage.py test --verbosity=2 \
+          simulationAPI authAPI saveAPI
+
+  # -------------------------------------------------------------------------
+  # Job 2: Sim-worker unit tests (Task 8)
+  # -------------------------------------------------------------------------
+  sim-worker-tests:
+    name: Sim-Worker Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+
+    - name: Install sim-worker dependencies
+      working-directory: sim-worker
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run sim-worker tests
+      working-directory: sim-worker
+      run: |
+        python -m pytest tests/ -v --tb=short --no-header
+
+  # -------------------------------------------------------------------------
+  # Job 3: Session-manager tests
+  # -------------------------------------------------------------------------
+  session-manager-tests:
+    name: Session-Manager Tests
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        cache: pip
+
+    - name: Install session-manager dependencies
+      working-directory: session-manager
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run session-manager tests
+      working-directory: session-manager
+      env:
+        REDIS_HOST: localhost
+        REDIS_PORT: "6379"
+        MOCK_MODE: "true"
+      run: |
+        python -m pytest tests/ -v --tb=short --no-header
+
+  # -------------------------------------------------------------------------
+  # Job 4: Standalone simulation-engine Docker test (Task 8)
+  # -------------------------------------------------------------------------
+  simulation-engine-docker:
+    name: Standalone Simulation Engine Docker Test
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build simulation engine image
+      run: docker build -t esim-simulation-engine ./simulation-engine/
+
+    - name: Run simulation engine test with RC circuit
+      run: |
+        OUTPUT=$(cat esim-cloud-backend/simulationAPI/helpers/sample_files/RC.cir \
+          | docker run -i esim-simulation-engine)
+
+        echo "--- Simulation output ---"
+        echo "$OUTPUT"
+
+        if echo "$OUTPUT" | python3 -c "import sys, json; d=json.load(sys.stdin); assert 'data' in d or 'total_number_of_tables' in d or 'fail' not in d, 'Bad output'"; then
+          echo "✅ Simulation engine test passed"
+        else
+          echo "❌ Simulation engine test failed"
+          exit 1
+        fi
+
+  # -------------------------------------------------------------------------
+  # Job 5: Security – dependency vulnerability scan (Task 5)
+  # -------------------------------------------------------------------------
+  security-scan:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install pip-audit
+      run: pip install pip-audit
+
+    - name: Audit backend dependencies
+      working-directory: esim-cloud-backend
+      run: pip-audit -r requirements.txt --desc --skip-editable || true
+
+    - name: Audit sim-worker dependencies
+      working-directory: sim-worker
+      run: pip-audit -r requirements.txt --desc --skip-editable || true

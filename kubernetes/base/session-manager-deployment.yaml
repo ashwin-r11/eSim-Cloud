@@ -1,0 +1,88 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: session-manager
+  labels:
+    app: session-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: session-manager
+  template:
+    metadata:
+      labels:
+        app: session-manager
+    spec:
+      serviceAccountName: session-manager-sa
+      containers:
+      - name: session-manager
+        image: esim-session-manager:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: MOCK_MODE
+          value: "false"
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "200m"
+            memory: "128Mi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: session-manager
+spec:
+  selector:
+    app: session-manager
+  ports:
+  - port: 8000
+    targetPort: 8000
+---
+# ServiceAccount with RBAC to create/delete/read simulation pods
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: session-manager-sa
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: simulation-pod-manager
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["create", "delete", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: session-manager-pod-manager
+subjects:
+- kind: ServiceAccount
+  name: session-manager-sa
+roleRef:
+  kind: Role
+  name: simulation-pod-manager
+  apiGroup: rbac.authorization.k8s.io
